@@ -1,0 +1,1 @@
+-- Persist the latest normalized snapshot rows produced by the monitor job.

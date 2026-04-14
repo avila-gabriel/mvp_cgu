@@ -1,0 +1,1 @@
+-- Mark previously known paths as removed when they disappear from the current crawl.

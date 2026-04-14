@@ -1,0 +1,451 @@
+version: "3"
+
+tasks:
+  shared:fmt:
+    desc: Format shared
+    internal: true
+    dir: shared
+    cmds:
+      - gleam format
+
+  shared:check:
+    desc: Check shared
+    internal: true
+    dir: shared
+    method: checksum
+    sources:
+      - gleam.toml
+      - manifest.toml
+      - src/**/*.gleam
+      - test/**/*.gleam
+    generates:
+      - ../.task/check-shared.stamp
+    cmds:
+      - gleam check
+      - mkdir -p ../.task && touch ../.task/check-shared.stamp
+
+  shared:test:
+    desc: Run shared tests
+    internal: true
+    dir: shared
+    cmds:
+      - gleam test
+
+  client:fmt:
+    desc: Format client
+    internal: true
+    dir: client
+    cmds:
+      - gleam format
+
+  client:check:
+    desc: Check client
+    internal: true
+    dir: client
+    method: checksum
+    sources:
+      - gleam.toml
+      - manifest.toml
+      - src/**/*.gleam
+      - src/**/*.mjs
+      - test/**/*.gleam
+      - ../shared/gleam.toml
+      - ../shared/manifest.toml
+      - ../shared/src/**/*.gleam
+    generates:
+      - ../.task/check-client.stamp
+    cmds:
+      - gleam check
+      - mkdir -p ../.task && touch ../.task/check-client.stamp
+
+  client:test:
+    desc: Run client tests
+    internal: true
+    dir: client
+    cmds:
+      - gleam test
+
+  client:build:
+    desc: Build client bundles into server/priv/static
+    internal: true
+    dir: client
+    method: checksum
+    sources:
+      - gleam.toml
+      - manifest.toml
+      - package.json
+      - package-lock.json
+      - src/**/*.gleam
+      - src/**/*.mjs
+      - ../shared/gleam.toml
+      - ../shared/manifest.toml
+      - ../shared/src/**/*.gleam
+      - ../server/gleam.toml
+      - ../server/manifest.toml
+      - ../server/src/**/*.gleam
+    generates:
+      - ../server/priv/static/client.js
+      - ../server/priv/static/client.css
+      - ../.task/build-client.stamp
+    cmds:
+      - mkdir -p ../server/priv/static
+      - find ../server/priv/static -maxdepth 1 -type f \( -name '*.js' -o -name '*.css' \) -delete
+      - gleam run -m lustre/dev build
+      - cp dist/client.js ../server/priv/static/client.js
+      - cp dist/client.css ../server/priv/static/client.css
+      - mkdir -p ../.task && touch ../.task/build-client.stamp
+
+  extension:fmt:
+    desc: Format extension
+    internal: true
+    dir: extension
+    cmds:
+      - gleam format
+
+  extension:check:
+    desc: Check extension
+    internal: true
+    dir: extension
+    method: checksum
+    sources:
+      - gleam.toml
+      - manifest.toml
+      - src/**/*.gleam
+      - src/**/*.mjs
+      - test/**/*.gleam
+      - ../shared/gleam.toml
+      - ../shared/manifest.toml
+      - ../shared/src/**/*.gleam
+    generates:
+      - ../.task/check-extension.stamp
+    cmds:
+      - gleam check
+      - mkdir -p ../.task && touch ../.task/check-extension.stamp
+
+  extension:test:
+    desc: Run extension tests
+    internal: true
+    dir: extension
+    cmds:
+      - gleam test
+
+  extension:build:
+    desc: Build the browser extension bundle
+    internal: true
+    dir: extension
+    method: checksum
+    sources:
+      - gleam.toml
+      - manifest.toml
+      - src/**/*.gleam
+      - src/**/*.mjs
+      - ../shared/gleam.toml
+      - ../shared/manifest.toml
+      - ../shared/src/**/*.gleam
+    generates:
+      - dist/extension.js
+      - dist/background.js
+      - ../.task/build-extension.stamp
+    cmds:
+      - rm -rf build dist
+      - mkdir -p dist
+      - gleam build --target javascript
+      - bun build src/extension_entry.mjs --outfile dist/extension.js --format iife
+      - bun build src/background_entry.mjs --outfile dist/background.js --format iife
+      - mkdir -p ../.task && touch ../.task/build-extension.stamp
+
+  server:fmt:
+    desc: Format server
+    internal: true
+    dir: server
+    cmds:
+      - gleam format
+
+  server:check:
+    desc: Check server
+    internal: true
+    dir: server
+    method: checksum
+    sources:
+      - gleam.toml
+      - manifest.toml
+      - src/**/*.gleam
+      - test/**/*.gleam
+      - dev/**/*.gleam
+      - priv/migrations/**/*.sql
+      - ../shared/gleam.toml
+      - ../shared/manifest.toml
+      - ../shared/src/**/*.gleam
+    generates:
+      - ../.task/check-server.stamp
+    cmds:
+      - gleam check
+      - mkdir -p ../.task && touch ../.task/check-server.stamp
+
+  server:test:
+    desc: Run server tests
+    internal: true
+    dir: server
+    env:
+      DATABASE_URL: "{{.DATABASE_URL_DEV_HOST}}"
+      SERVER_TEST_ALLOW_DESTRUCTIVE: "yes"
+      SERVER_TEST_DATABASE_URL: "{{.DATABASE_URL_DEV_HOST}}"
+    cmds:
+      - task: dev:migrate
+      - gleam test
+
+  server:startup:check:
+    desc: Run server startup checks without applying migrations
+    internal: true
+    dir: server
+    env:
+      DATABASE_URL: "{{.DATABASE_URL_DEV_HOST}}"
+      PORT: "{{.APP_PORT}}"
+    cmds:
+      - gleam run -m startup
+
+  server:shipment:
+    desc: Export the server Erlang shipment for deployment
+    internal: true
+    dir: server
+    cmds:
+      - gleam export erlang-shipment
+
+  dev:migrate:
+    desc: Apply migrations to the local development database
+    internal: true
+    dir: server
+    env:
+      DATABASE_URL: "{{.DATABASE_URL_DEV_HOST}}"
+    cmds:
+      - task: dev:db:ensure
+      - gleam run -m cigogne all
+      - gleam run -m m25 migrate --apply=true --addr="{{.DATABASE_URL_DEV_HOST}}"
+
+  dev:db:ensure:
+    desc: Ensure a local Postgres instance is available on {{.DEV_POSTGRES_HOST_PORT}}
+    internal: true
+    cmds:
+      - |
+        desired_port="{{.DEV_POSTGRES_HOST_PORT}}"
+        container_name="{{.POSTGRES_CONTAINER_NAME}}"
+
+        if psql "{{.DATABASE_URL_DEV_HOST}}" -c 'select 1' >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        if docker container inspect "$container_name" >/dev/null 2>&1; then
+          current_port="$(docker port "$container_name" 5432/tcp 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')"
+
+          if [ "$current_port" != "$desired_port" ]; then
+            docker rm -f "$container_name" >/dev/null 2>&1 || true
+          else
+            docker start "$container_name" >/dev/null 2>&1 || true
+          fi
+        fi
+
+        if ! docker container inspect "$container_name" >/dev/null 2>&1; then
+          docker run -d \
+            --name "$container_name" \
+            -e POSTGRES_USER={{.POSTGRES_USER}} \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB={{.POSTGRES_DB}} \
+            -p "$desired_port":5432 \
+            postgres:16-alpine >/dev/null
+        else
+          docker start "$container_name" >/dev/null 2>&1 || true
+        fi
+
+        for i in $(seq 1 30); do
+          if psql "{{.DATABASE_URL_DEV_HOST}}" -c 'select 1' >/dev/null 2>&1; then
+            exit 0
+          fi
+          sleep 1
+        done
+
+        exit 1
+
+  dev:db:up:
+    desc: Start a fresh local Postgres Docker container on {{.DEV_POSTGRES_HOST_PORT}}
+    internal: true
+    cmds:
+      - docker rm -f "{{.POSTGRES_CONTAINER_NAME}}" >/dev/null 2>&1 || true
+      - |
+        docker run -d \
+          --name "{{.POSTGRES_CONTAINER_NAME}}" \
+          -e POSTGRES_USER={{.POSTGRES_USER}} \
+          -e POSTGRES_PASSWORD=postgres \
+          -e POSTGRES_DB={{.POSTGRES_DB}} \
+          -p {{.DEV_POSTGRES_HOST_PORT}}:5432 \
+          postgres:16-alpine >/dev/null
+      - |
+        for i in $(seq 1 30); do
+          if psql "{{.DATABASE_URL_DEV_HOST}}" -c 'select 1' >/dev/null 2>&1; then
+            exit 0
+          fi
+          sleep 1
+        done
+        exit 1
+
+  dev:db:down:
+    desc: Stop the local Postgres Docker container
+    internal: true
+    cmds:
+      - docker rm -f "{{.POSTGRES_CONTAINER_NAME}}" >/dev/null 2>&1 || true
+
+  dev:app:
+    desc: Build the local app and run the server
+    internal: true
+    cmds:
+      - task: client:build
+      - task: extension:build
+      - task: server:startup:check
+      - task: server:run
+
+  prod:env:check:
+    desc: Validate required production environment variables
+    internal: true
+    cmds:
+      - |
+        : "${SITE_ADDRESS:?SITE_ADDRESS is required}"
+
+  prod:config:check:
+    desc: Validate production compose config
+    internal: true
+    dir: deploy
+    cmds:
+      - task: prod:env:check
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f compose.yaml config >/dev/null
+
+  prod:caddy:render:
+    desc: Render the deployed Caddyfile
+    internal: true
+    dir: deploy
+    vars:
+      ACTIVE_APP_HOST: '{{default "app_blue" .ACTIVE_APP_HOST}}'
+    cmds:
+      - task: prod:env:check
+      - |
+        docker run --rm \
+          -e SITE_ADDRESS \
+          -v "$PWD/Caddyfile:/template/Caddyfile:ro" \
+          -v "{{.DEPLOY_ROOT}}:/target" \
+          alpine sh -eu -c '
+            mkdir -p /target
+            sed \
+              -e "s|__SITE_ADDRESS__|$SITE_ADDRESS|g" \
+              -e "s|__ACTIVE_APP_HOST__|{{.ACTIVE_APP_HOST}}|g" \
+              -e "s|__APP_PORT__|{{.APP_PORT}}|g" \
+              /template/Caddyfile > /target/Caddyfile
+            chmod 0644 /target/Caddyfile
+          '
+
+  prod:caddy:ensure:
+    internal: true
+    dir: deploy
+    status:
+      - test -f "{{.DEPLOY_ROOT}}/Caddyfile"
+    cmds:
+      - task: prod:caddy:render
+        vars:
+          ACTIVE_APP_HOST: app_blue
+
+  server:run:
+    desc: Run the Gleam server locally
+    internal: true
+    dir: server
+    env:
+      DATABASE_URL: "{{.DATABASE_URL_DEV_HOST}}"
+      PORT: "{{.APP_PORT}}"
+    cmds:
+      - gleam run
+
+  prod:prepare:dirs:
+    internal: true
+    dir: deploy
+    cmds:
+      - task: prod:env:check
+      - |
+        docker run --rm \
+          -v "{{.DEPLOY_ROOT}}:/target" \
+          alpine sh -eu -c '
+            mkdir -p \
+              /target/postgres \
+              /target/caddy-data \
+              /target/caddy-config
+            chmod 0755 /target /target/postgres /target/caddy-data /target/caddy-config
+          '
+      - task: prod:caddy:ensure
+
+  prod:migrate:
+    internal: true
+    vars:
+      APP_HOST: '{{.APP_HOST}}'
+    cmds:
+      - |
+          DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml run --rm \
+            --no-deps \
+            -e DATABASE_URL="{{.DATABASE_URL_DOCKER}}" \
+            "{{.APP_HOST}}" \
+            sh -c 'exec erl -pa /app/*/ebin -eval "application:ensure_all_started(m25), m25:main(), halt()." -noshell -extra migrate --apply=true --addr=$DATABASE_URL'
+
+  prod:wait:postgres:
+    internal: true
+    cmds:
+      - |
+          until DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml exec -T postgres pg_isready >/dev/null 2>&1; do
+            sleep 1
+          done
+
+  prod:db:dump:file:
+    internal: true
+    vars:
+      BACKUP_FILE: '{{.BACKUP_FILE}}'
+    cmds:
+      - |
+          mkdir -p "$(dirname "{{.BACKUP_FILE}}")"
+          DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml exec -T postgres \
+            pg_dump --format=custom --no-owner --no-privileges \
+            -U "{{.POSTGRES_USER}}" \
+            -d "{{.POSTGRES_DB}}" > "{{.BACKUP_FILE}}"
+
+  prod:db:restore:file:
+    internal: true
+    vars:
+      BACKUP_FILE: '{{.BACKUP_FILE}}'
+    cmds:
+      - |
+          test -f "{{.BACKUP_FILE}}"
+          cat "{{.BACKUP_FILE}}" | DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml exec -T postgres \
+            pg_restore --clean --if-exists --no-owner --no-privileges \
+            -U "{{.POSTGRES_USER}}" \
+            -d "{{.POSTGRES_DB}}"
+
+  deploy:wait:healthy:
+    internal: true
+    vars:
+      APP_HOST: '{{.APP_HOST}}'
+    cmds:
+      - |
+          CONTAINER_ID="$(DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml ps -q "{{.APP_HOST}}")"
+          test -n "$CONTAINER_ID"
+
+          ATTEMPTS=0
+          while [ "$ATTEMPTS" -lt 60 ]; do
+            STATUS="$(docker inspect -f '{{"{{"}}if .State.Health{{"}}"}}{{"{{"}}.State.Health.Status{{"}}"}}{{"{{"}}else{{"}}"}}{{"{{"}}.State.Status{{"}}"}}{{"{{"}}end{{"}}"}}' "$CONTAINER_ID")"
+
+            if [ "$STATUS" = "healthy" ]; then
+              exit 0
+            fi
+
+            if [ "$STATUS" = "unhealthy" ] || [ "$STATUS" = "exited" ] || [ "$STATUS" = "dead" ]; then
+              docker logs "$CONTAINER_ID" || true
+              exit 1
+            fi
+
+            ATTEMPTS=$((ATTEMPTS + 1))
+            sleep 2
+          done
+
+          docker logs "$CONTAINER_ID" || true
+          exit 1

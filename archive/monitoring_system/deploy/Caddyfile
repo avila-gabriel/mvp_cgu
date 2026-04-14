@@ -1,0 +1,11 @@
+__SITE_ADDRESS__ {
+    encode gzip
+
+    reverse_proxy __ACTIVE_APP_HOST__:__APP_PORT__
+
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+}

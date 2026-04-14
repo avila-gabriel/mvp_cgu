@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: monitoring_system
+    volumes:
+      - ${DEPLOY_ROOT:-/srv/monitoring-system}/postgres:/var/lib/postgresql/data
+
+  app_blue:
+    image: monitoring-system-app:blue
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/monitoring_system
+      PORT: "4000"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 4000"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  app_green:
+    image: monitoring-system-app:green
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/monitoring_system
+      PORT: "4000"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 4000"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  caddy:
+    image: caddy:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ${DEPLOY_ROOT:-/srv/monitoring-system}/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${DEPLOY_ROOT:-/srv/monitoring-system}/caddy-data:/data
+      - ${DEPLOY_ROOT:-/srv/monitoring-system}/caddy-config:/config
