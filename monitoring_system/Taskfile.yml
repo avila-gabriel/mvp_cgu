@@ -1,0 +1,259 @@
+version: "3"
+
+includes:
+  internals:
+    taskfile: .Taskfile.yml
+    flatten: true
+
+vars:
+  POSTGRES_USER: postgres
+  POSTGRES_DB: monitoring_system
+  DEV_POSTGRES_HOST_PORT: 5433
+  POSTGRES_CONTAINER_NAME: monitoring-system-postgres
+  DATABASE_URL_DEV_HOST: postgres://postgres:postgres@127.0.0.1:{{.DEV_POSTGRES_HOST_PORT}}/{{.POSTGRES_DB}}
+  DATABASE_URL_DOCKER: postgres://postgres:postgres@postgres:5432/{{.POSTGRES_DB}}
+  DEPLOY_ROOT: '{{default "/srv/monitoring-system" .DEPLOY_ROOT}}'
+  APP_PORT: 4000
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  server:sql:gen:
+    desc: Regenerate squirrel queries against the local database
+    dir: server
+    env:
+      DATABASE_URL: "{{.DATABASE_URL_DEV_HOST}}"
+    cmds:
+      - task: dev:migrate
+      - gleam run -m squirrel
+
+  server:sql:check:
+    desc: Verify generated squirrel code is up to date
+    dir: server
+    env:
+      DATABASE_URL: "{{.DATABASE_URL_DEV_HOST}}"
+    cmds:
+      - task: dev:migrate
+      - gleam run -m squirrel check
+
+
+  dev:db:reset:
+    desc: Reset local database state and reapply migrations
+    dir: server
+    env:
+      DATABASE_URL: "{{.DATABASE_URL_DEV_HOST}}"
+    cmds:
+      - task: dev:db:down
+      - task: dev:db:up
+      - task: dev:migrate
+
+  dev:db:shell:
+    desc: Open a local psql shell against the development database
+    cmds:
+      - task: dev:db:ensure
+      - psql "{{.DATABASE_URL_DEV_HOST}}"
+
+  fmt:
+    desc: Format all Gleam packages
+    cmds:
+      - task: shared:fmt
+      - task: client:fmt
+      - task: extension:fmt
+      - task: server:fmt
+
+  check:
+    desc: Check all Gleam packages
+    cmds:
+      - task: fmt
+      - task: shared:check
+      - task: client:check
+      - task: extension:check
+      - task: server:check
+
+  test:
+    desc: Run the supported local test suite
+    cmds:
+      - task: shared:test
+      - task: client:test
+      - task: extension:test
+      - task: server:test
+
+  build:
+    desc: Build app and extension artifacts, then check everything
+    cmds:
+      - task: client:build
+      - task: extension:build
+      - task: check
+
+  dev:
+    desc: Build locally and run the app with a local Postgres container
+    cmds:
+      - task: dev:migrate
+      - task: dev:app
+
+  prod:build:
+    desc: Build production artifacts and both app images
+    cmds:
+      - task: prod:config:check
+      - task: client:build
+      - task: extension:build
+      - task: server:shipment
+      - docker build -f deploy/Dockerfile.app -t monitoring-system-app:blue .
+      - docker build -f deploy/Dockerfile.app -t monitoring-system-app:green .
+
+  prod:up:
+    desc: Start production stack
+    vars:
+      ACTIVE_APP_HOST:
+        sh: >-
+          if [ -f "{{.DEPLOY_ROOT}}/Caddyfile" ] &&
+          grep -q 'reverse_proxy app_green:' "{{.DEPLOY_ROOT}}/Caddyfile"; then
+            printf 'app_green'
+          else
+            printf 'app_blue'
+          fi
+    cmds:
+      - task: prod:config:check
+      - task: prod:prepare:dirs
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml up -d postgres
+      - task: prod:wait:postgres
+      - task: prod:migrate
+        vars:
+          APP_HOST: "{{.ACTIVE_APP_HOST}}"
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml up -d "{{.ACTIVE_APP_HOST}}" caddy
+
+  prod:down:
+    desc: Stop production stack
+    cmds:
+      - task: prod:env:check
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml down
+
+  prod:logs:
+    desc: Tail production logs
+    cmds:
+      - task: prod:env:check
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml logs -f
+
+  prod:status:
+    desc: Show production status
+    cmds:
+      - task: prod:env:check
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml ps
+
+  prod:db:dump:
+    desc: Dump the production database to BACKUP_FILE
+    requires:
+      vars: [BACKUP_FILE]
+    cmds:
+      - task: prod:env:check
+      - task: prod:db:dump:file
+        vars:
+          BACKUP_FILE: "{{.BACKUP_FILE}}"
+
+  prod:db:restore:
+    desc: Restore the production database from BACKUP_FILE
+    requires:
+      vars: [BACKUP_FILE]
+    cmds:
+      - task: prod:config:check
+      - task: prod:prepare:dirs
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml up -d postgres
+      - task: prod:wait:postgres
+      - task: prod:db:restore:file
+        vars:
+          BACKUP_FILE: "{{.BACKUP_FILE}}"
+
+  prod:db:shell:
+    desc: Open a read-only psql shell against the production Postgres container
+    cmds:
+      - task: prod:config:check
+      - task: prod:prepare:dirs
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml up -d postgres
+      - task: prod:wait:postgres
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml exec postgres sh -lc 'PGOPTIONS="-c default_transaction_read_only=on" psql -U "{{.POSTGRES_USER}}" -d "{{.POSTGRES_DB}}"'
+
+  prod:db:shell:admin:
+    desc: Open an admin psql shell against production Postgres. Do not use this unless you really need write access.
+    cmds:
+      - task: prod:config:check
+      - task: prod:prepare:dirs
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml up -d postgres
+      - task: prod:wait:postgres
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml exec postgres psql -U "{{.POSTGRES_USER}}" -d "{{.POSTGRES_DB}}"
+
+  deploy:compatible:
+    desc: Deploy to inactive slot and switch traffic
+    vars:
+      ACTIVE_APP_HOST:
+        sh: >-
+          if [ -f "{{.DEPLOY_ROOT}}/Caddyfile" ] &&
+          grep -q 'reverse_proxy app_green:' "{{.DEPLOY_ROOT}}/Caddyfile"; then
+            printf 'app_green'
+          else
+            printf 'app_blue'
+          fi
+      TARGET_APP_HOST: '{{if eq .ACTIVE_APP_HOST "app_blue"}}app_green{{else}}app_blue{{end}}'
+      TARGET_IMAGE: '{{if eq .ACTIVE_APP_HOST "app_blue"}}monitoring-system-app:green{{else}}monitoring-system-app:blue{{end}}'
+    cmds:
+      - task: prod:config:check
+      - task: prod:prepare:dirs
+      - task: client:build
+      - task: extension:build
+      - task: server:shipment
+      - docker build -f deploy/Dockerfile.app -t "{{.TARGET_IMAGE}}" .
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml up -d "{{.TARGET_APP_HOST}}"
+      - task: deploy:wait:healthy
+        vars:
+          APP_HOST: "{{.TARGET_APP_HOST}}"
+      - task: prod:caddy:render
+        vars:
+          ACTIVE_APP_HOST: "{{.TARGET_APP_HOST}}"
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml up -d --force-recreate caddy
+
+  deploy:breaking:
+    desc: Stop active slot, deploy inactive slot, switch traffic
+    vars:
+      ACTIVE_APP_HOST:
+        sh: >-
+          if [ -f "{{.DEPLOY_ROOT}}/Caddyfile" ] &&
+          grep -q 'reverse_proxy app_green:' "{{.DEPLOY_ROOT}}/Caddyfile"; then
+            printf 'app_green'
+          else
+            printf 'app_blue'
+          fi
+      TARGET_APP_HOST: '{{if eq .ACTIVE_APP_HOST "app_blue"}}app_green{{else}}app_blue{{end}}'
+      TARGET_IMAGE: '{{if eq .ACTIVE_APP_HOST "app_blue"}}monitoring-system-app:green{{else}}monitoring-system-app:blue{{end}}'
+    cmds:
+      - task: prod:config:check
+      - task: prod:prepare:dirs
+      - task: client:build
+      - task: extension:build
+      - task: server:shipment
+      - docker build -f deploy/Dockerfile.app -t "{{.TARGET_IMAGE}}" .
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml stop "{{.ACTIVE_APP_HOST}}"
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml up -d "{{.TARGET_APP_HOST}}"
+      - task: deploy:wait:healthy
+        vars:
+          APP_HOST: "{{.TARGET_APP_HOST}}"
+      - task: prod:caddy:render
+        vars:
+          ACTIVE_APP_HOST: "{{.TARGET_APP_HOST}}"
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml up -d --force-recreate caddy
+
+  deploy:status:
+    desc: Show active app color and service status
+    vars:
+      ACTIVE_APP_HOST:
+        sh: >-
+          if [ -f "{{.DEPLOY_ROOT}}/Caddyfile" ] &&
+          grep -q 'reverse_proxy app_green:' "{{.DEPLOY_ROOT}}/Caddyfile"; then
+            printf 'app_green'
+          else
+            printf 'app_blue'
+          fi
+    cmds:
+      - printf 'ACTIVE_APP_HOST=%s\n' "{{.ACTIVE_APP_HOST}}"
+      - DEPLOY_ROOT="{{.DEPLOY_ROOT}}" docker compose -f deploy/compose.yaml ps app_blue app_green caddy

@@ -1,0 +1,2 @@
+-- Load the full monitoring scope for one evaluation:
+-- active items, monitored URLs, known paths, and latest baseline snapshots.

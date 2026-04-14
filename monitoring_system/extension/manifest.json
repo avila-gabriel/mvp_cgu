@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Form Submit Forwarder",
+  "version": "0.1.0",
+  "description": "Intercepts a target form submit and forwards a copy.",
+  "background": {
+    "service_worker": "dist/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://__TARGET_SITE_HERE__/*"],
+      "js": ["dist/extension.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "host_permissions": ["https://__SERVER_HOSTNAME_HERE__/*"]
+}
