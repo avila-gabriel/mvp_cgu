@@ -1,1 +1,16 @@
+.knowledge
 .codex
+.cache/
+.venv/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+cgu-pipeline/worker/.venv/
+cgu-pipeline/worker/.ruff_cache/
+cgu-pipeline/worker/data/
+cgu-pipeline/worker/*.egg-info/
+cgu-pipeline/master/build/
+cgu-pipeline/master/input/
+cgu-pipeline/master/priv/static/
+cgu-pipeline/.deploy/
+note

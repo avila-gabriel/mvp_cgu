@@ -1,0 +1,166 @@
+version: "3"
+
+includes:
+  internals:
+    taskfile: ./.Taskfile.yml
+    flatten: true
+
+vars:
+  POSTGRES_USER: postgres
+  POSTGRES_DB: cgu_pipeline_local
+  POSTGRES_CONTAINER_NAME: cgu-pipeline-postgres
+  DEV_POSTGRES_HOST_PORT: 5434
+  DATABASE_URL_DEV_HOST: postgres://postgres:postgres@127.0.0.1:{{.DEV_POSTGRES_HOST_PORT}}/{{.POSTGRES_DB}}
+  DATABASE_URL_DOCKER: postgres://postgres:postgres@postgres:5432/{{.POSTGRES_DB}}
+  BUCKET_CONTAINER_NAME: cgu-pipeline-bucket
+  BUCKET_HOST_PORT: 19000
+  BUCKET_CONSOLE_PORT: 19001
+  BUCKET_ROOT_USER: cgu_pipeline
+  BUCKET_ROOT_PASSWORD: cgu_pipeline_dev_password
+  BUCKET_NAME: cgu-pipeline-artifacts
+  BUCKET_REGION: us-east-1
+  BUCKET_REQUEST_TIMEOUT_MS: 30000
+  MASTER_ACCESS_KEY: '{{default "" .MASTER_ACCESS_KEY}}'
+  DEPLOY_ROOT: '{{default "/home/gabri/Work/cgu_mvp/cgu-pipeline/.deploy" .DEPLOY_ROOT}}'
+  MASTER_PORT: 80
+
+tasks:
+  fmt:
+    desc: Format all pipeline packages
+    cmds:
+      - task: client:fmt
+      - task: master:fmt
+      - task: worker:fmt
+      - task: shared:fmt
+
+  check:
+    desc: Compile all pipeline packages
+    cmds:
+      - task: client:check
+      - task: master:check
+      - task: worker:check
+      - task: shared:check
+
+  test:
+    desc: Run all pipeline tests
+    cmds:
+      - task: client:test
+      - task: shared:test
+      - task: master:test
+      - task: worker:test
+
+  integration:
+    desc: Run Docker-backed integration checks
+    dir: master
+    cmds:
+      - gleam run -m integration
+
+  dev:
+    desc: Run local master and worker
+    cmds:
+      - task: knowledge:ensure
+      - task: dev:stack
+
+  dev:master:
+    desc: Run local master
+    cmds:
+      - task: knowledge:ensure
+      - task: master:dev
+
+  dev:worker:
+    desc: Run local worker
+    cmds:
+      - task: knowledge:ensure
+      - task: worker:dev
+
+  prepare:
+    desc: Prepare cleaned text from collected artifacts
+    cmds:
+      - task: worker:prepare
+
+  sql:gen:
+    desc: Regenerate master Squirrel queries
+    dir: master
+    env:
+      DATABASE_URL: "{{.DATABASE_URL_DEV_HOST}}"
+    cmds:
+      - task: master:dev:db:ensure
+      - task: master:dev:migrate
+      - gleam run -m squirrel
+
+  sql:check:
+    desc: Verify generated master Squirrel queries
+    dir: master
+    env:
+      DATABASE_URL: "{{.DATABASE_URL_DEV_HOST}}"
+    cmds:
+      - task: master:dev:db:ensure
+      - task: master:dev:migrate
+      - gleam run -m squirrel check
+
+  prod:build:
+    desc: Build the master app image
+    dir: master
+    cmds:
+      - task: client:build
+      - task: master:shipment
+      - docker build -f deploy/Dockerfile.master -t master:prod .
+
+  prod:up:
+    desc: Start production master stack
+    dir: master
+    cmds:
+      - task: prod:prepare
+      - |
+        export DEPLOY_ROOT="{{.DEPLOY_ROOT}}"
+        if [ -f ./.env ]; then
+          set -a
+          . ./.env
+          set +a
+        fi
+        docker compose -f deploy/compose.yaml up -d postgres minio master caddy
+
+  prod:down:
+    desc: Stop production master stack
+    dir: master
+    cmds:
+      - |
+        export DEPLOY_ROOT="{{.DEPLOY_ROOT}}"
+        if [ -f ./.env ]; then
+          set -a
+          . ./.env
+          set +a
+        fi
+        docker compose -f deploy/compose.yaml down
+
+  prod:logs:
+    desc: Tail production logs
+    dir: master
+    cmds:
+      - |
+        export DEPLOY_ROOT="{{.DEPLOY_ROOT}}"
+        if [ -f ./.env ]; then
+          set -a
+          . ./.env
+          set +a
+        fi
+        docker compose -f deploy/compose.yaml logs -f
+
+  prod:status:
+    desc: Show production service status
+    dir: master
+    cmds:
+      - |
+        export DEPLOY_ROOT="{{.DEPLOY_ROOT}}"
+        if [ -f ./.env ]; then
+          set -a
+          . ./.env
+          set +a
+        fi
+        docker compose -f deploy/compose.yaml ps
+
+  worker:bootstrap:
+    desc: Bootstrap a worker machine
+    dir: worker
+    cmds:
+      - bash deploy/vlab.sh

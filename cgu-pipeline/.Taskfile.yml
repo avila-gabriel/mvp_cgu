@@ -1,0 +1,362 @@
+version: "3"
+
+tasks:
+  client:fmt:
+    internal: true
+    dir: client
+    cmds:
+      - gleam format
+
+  client:check:
+    internal: true
+    dir: client
+    cmds:
+      - gleam check
+
+  client:test:
+    internal: true
+    dir: client
+    cmds:
+      - gleam test
+
+  client:build:
+    internal: true
+    dir: client
+    cmds:
+      - gleam run -m lustre/dev build --minify --outdir=../master/priv/static
+
+  master:fmt:
+    internal: true
+    dir: master
+    cmds:
+      - find src dev test -name '*.gleam' ! -path '*/queries/sql.gleam' -print | xargs gleam format
+
+  master:check:
+    internal: true
+    dir: master
+    env:
+      DATABASE_URL: "{{.DATABASE_URL_DEV_HOST}}"
+      PORT: "{{.MASTER_PORT}}"
+      BUCKET_ENDPOINT_SCHEME: http
+      BUCKET_ENDPOINT_HOST: 127.0.0.1
+      BUCKET_ENDPOINT_PORT: "{{.BUCKET_HOST_PORT}}"
+      BUCKET_REGION: "{{.BUCKET_REGION}}"
+      BUCKET_ACCESS_KEY_ID: "{{.BUCKET_ROOT_USER}}"
+      BUCKET_SECRET_ACCESS_KEY: "{{.BUCKET_ROOT_PASSWORD}}"
+      BUCKET_NAME: "{{.BUCKET_NAME}}"
+      BUCKET_REQUEST_TIMEOUT_MS: "{{.BUCKET_REQUEST_TIMEOUT_MS}}"
+      MASTER_ACCESS_KEY: "{{.MASTER_ACCESS_KEY}}"
+    cmds:
+      - gleam check
+
+  master:test:
+    internal: true
+    dir: master
+    cmds:
+      - gleam test
+
+  master:dev:
+    internal: true
+    cmds:
+      - task: master:dev:db:ensure
+      - task: master:dev:bucket:ensure
+      - task: master:dev:migrate
+      - task: master:dev:server
+
+  master:dev:db:ensure:
+    internal: true
+    dir: master
+    cmds:
+      - |
+        if docker container inspect "{{.POSTGRES_CONTAINER_NAME}}" >/dev/null 2>&1; then
+          docker start "{{.POSTGRES_CONTAINER_NAME}}" >/dev/null 2>&1 || true
+        else
+          docker run -d \
+            --name "{{.POSTGRES_CONTAINER_NAME}}" \
+            -e POSTGRES_USER="{{.POSTGRES_USER}}" \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB="{{.POSTGRES_DB}}" \
+            -p "{{.DEV_POSTGRES_HOST_PORT}}":5432 \
+            postgres:16-alpine >/dev/null
+        fi
+
+        for i in $(seq 1 30); do
+          if docker exec "{{.POSTGRES_CONTAINER_NAME}}" pg_isready -U "{{.POSTGRES_USER}}" -d "{{.POSTGRES_DB}}" >/dev/null 2>&1; then
+            docker exec "{{.POSTGRES_CONTAINER_NAME}}" psql -U "{{.POSTGRES_USER}}" -d postgres -tc "select 1 from pg_database where datname = '{{.POSTGRES_DB}}'" | grep -q 1 \
+              || docker exec "{{.POSTGRES_CONTAINER_NAME}}" createdb -U "{{.POSTGRES_USER}}" "{{.POSTGRES_DB}}"
+            exit 0
+          fi
+          sleep 1
+        done
+
+        echo "Postgres did not become ready in time" >&2
+        exit 1
+
+  master:dev:migrate:
+    internal: true
+    dir: master
+    env:
+      DATABASE_URL: "{{.DATABASE_URL_DEV_HOST}}"
+    cmds:
+      - gleam run -m cigogne all
+
+  master:dev:bucket:ensure:
+    internal: true
+    dir: master
+    cmds:
+      - |
+        if docker container inspect "{{.BUCKET_CONTAINER_NAME}}" >/dev/null 2>&1; then
+          docker start "{{.BUCKET_CONTAINER_NAME}}" >/dev/null 2>&1 || true
+        else
+          docker run -d \
+            --name "{{.BUCKET_CONTAINER_NAME}}" \
+            -e MINIO_ROOT_USER="{{.BUCKET_ROOT_USER}}" \
+            -e MINIO_ROOT_PASSWORD="{{.BUCKET_ROOT_PASSWORD}}" \
+            -p "{{.BUCKET_HOST_PORT}}":9000 \
+            -p "{{.BUCKET_CONSOLE_PORT}}":9001 \
+            minio/minio:latest server /data --console-address ":9001" >/dev/null
+        fi
+
+        for i in $(seq 1 30); do
+          if curl -fsS "http://127.0.0.1:{{.BUCKET_HOST_PORT}}/minio/health/ready" >/dev/null 2>&1; then
+            exit 0
+          fi
+          sleep 1
+        done
+
+        echo "Bucket storage did not become ready in time" >&2
+        exit 1
+
+  master:dev:server:
+    internal: true
+    dir: master
+    cmds:
+      - |
+        database_url="${DATABASE_URL:-}"
+        port="${PORT:-}"
+        bucket_endpoint_scheme="${BUCKET_ENDPOINT_SCHEME:-}"
+        bucket_endpoint_host="${BUCKET_ENDPOINT_HOST:-}"
+        bucket_endpoint_port="${BUCKET_ENDPOINT_PORT:-}"
+        bucket_region="${BUCKET_REGION:-}"
+        bucket_access_key_id="${BUCKET_ACCESS_KEY_ID:-}"
+        bucket_secret_access_key="${BUCKET_SECRET_ACCESS_KEY:-}"
+        bucket_name="${BUCKET_NAME:-}"
+        bucket_request_timeout_ms="${BUCKET_REQUEST_TIMEOUT_MS:-}"
+        master_access_key="${MASTER_ACCESS_KEY:-}"
+
+        export DATABASE_URL="{{.DATABASE_URL_DEV_HOST}}"
+        export PORT="{{.MASTER_PORT}}"
+        export BUCKET_ENDPOINT_SCHEME=http
+        export BUCKET_ENDPOINT_HOST=127.0.0.1
+        export BUCKET_ENDPOINT_PORT="{{.BUCKET_HOST_PORT}}"
+        export BUCKET_REGION="{{.BUCKET_REGION}}"
+        export BUCKET_ACCESS_KEY_ID="{{.BUCKET_ROOT_USER}}"
+        export BUCKET_SECRET_ACCESS_KEY="{{.BUCKET_ROOT_PASSWORD}}"
+        export BUCKET_NAME="{{.BUCKET_NAME}}"
+        export BUCKET_REQUEST_TIMEOUT_MS="{{.BUCKET_REQUEST_TIMEOUT_MS}}"
+        export MASTER_ACCESS_KEY="{{.MASTER_ACCESS_KEY}}"
+
+        if [ -f ./.env ]; then
+          set -a
+          . ./.env
+          set +a
+        fi
+
+        if [ -n "$database_url" ]; then export DATABASE_URL="$database_url"; fi
+        if [ -n "$port" ]; then export PORT="$port"; fi
+        if [ -n "$bucket_endpoint_scheme" ]; then export BUCKET_ENDPOINT_SCHEME="$bucket_endpoint_scheme"; fi
+        if [ -n "$bucket_endpoint_host" ]; then export BUCKET_ENDPOINT_HOST="$bucket_endpoint_host"; fi
+        if [ -n "$bucket_endpoint_port" ]; then export BUCKET_ENDPOINT_PORT="$bucket_endpoint_port"; fi
+        if [ -n "$bucket_region" ]; then export BUCKET_REGION="$bucket_region"; fi
+        if [ -n "$bucket_access_key_id" ]; then export BUCKET_ACCESS_KEY_ID="$bucket_access_key_id"; fi
+        if [ -n "$bucket_secret_access_key" ]; then export BUCKET_SECRET_ACCESS_KEY="$bucket_secret_access_key"; fi
+        if [ -n "$bucket_name" ]; then export BUCKET_NAME="$bucket_name"; fi
+        if [ -n "$bucket_request_timeout_ms" ]; then export BUCKET_REQUEST_TIMEOUT_MS="$bucket_request_timeout_ms"; fi
+        if [ -n "$master_access_key" ]; then export MASTER_ACCESS_KEY="$master_access_key"; fi
+
+        gleam run
+
+  master:shipment:
+    internal: true
+    dir: master
+    cmds:
+      - |
+        database_url="${DATABASE_URL:-}"
+        port="${PORT:-}"
+        bucket_endpoint_scheme="${BUCKET_ENDPOINT_SCHEME:-}"
+        bucket_endpoint_host="${BUCKET_ENDPOINT_HOST:-}"
+        bucket_endpoint_port="${BUCKET_ENDPOINT_PORT:-}"
+        bucket_region="${BUCKET_REGION:-}"
+        bucket_access_key_id="${BUCKET_ACCESS_KEY_ID:-}"
+        bucket_secret_access_key="${BUCKET_SECRET_ACCESS_KEY:-}"
+        bucket_name="${BUCKET_NAME:-}"
+        bucket_request_timeout_ms="${BUCKET_REQUEST_TIMEOUT_MS:-}"
+        master_access_key="${MASTER_ACCESS_KEY:-}"
+
+        export DATABASE_URL="{{.DATABASE_URL_DOCKER}}"
+        export PORT="{{.MASTER_PORT}}"
+        export BUCKET_ENDPOINT_SCHEME=http
+        export BUCKET_ENDPOINT_HOST=minio
+        export BUCKET_ENDPOINT_PORT=9000
+        export BUCKET_REGION="{{.BUCKET_REGION}}"
+        export BUCKET_ACCESS_KEY_ID="{{.BUCKET_ROOT_USER}}"
+        export BUCKET_SECRET_ACCESS_KEY="{{.BUCKET_ROOT_PASSWORD}}"
+        export BUCKET_NAME="{{.BUCKET_NAME}}"
+        export BUCKET_REQUEST_TIMEOUT_MS="{{.BUCKET_REQUEST_TIMEOUT_MS}}"
+        export MASTER_ACCESS_KEY="{{.MASTER_ACCESS_KEY}}"
+
+        if [ -f ./.env ]; then
+          set -a
+          . ./.env
+          set +a
+        fi
+
+        if [ -n "$database_url" ]; then export DATABASE_URL="$database_url"; fi
+        if [ -n "$port" ]; then export PORT="$port"; fi
+        if [ -n "$bucket_endpoint_scheme" ]; then export BUCKET_ENDPOINT_SCHEME="$bucket_endpoint_scheme"; fi
+        if [ -n "$bucket_endpoint_host" ]; then export BUCKET_ENDPOINT_HOST="$bucket_endpoint_host"; fi
+        if [ -n "$bucket_endpoint_port" ]; then export BUCKET_ENDPOINT_PORT="$bucket_endpoint_port"; fi
+        if [ -n "$bucket_region" ]; then export BUCKET_REGION="$bucket_region"; fi
+        if [ -n "$bucket_access_key_id" ]; then export BUCKET_ACCESS_KEY_ID="$bucket_access_key_id"; fi
+        if [ -n "$bucket_secret_access_key" ]; then export BUCKET_SECRET_ACCESS_KEY="$bucket_secret_access_key"; fi
+        if [ -n "$bucket_name" ]; then export BUCKET_NAME="$bucket_name"; fi
+        if [ -n "$bucket_request_timeout_ms" ]; then export BUCKET_REQUEST_TIMEOUT_MS="$bucket_request_timeout_ms"; fi
+        if [ -n "$master_access_key" ]; then export MASTER_ACCESS_KEY="$master_access_key"; fi
+
+        gleam export erlang-shipment
+
+  worker:fmt:
+    internal: true
+    dir: worker
+    cmds:
+      - gleam format
+
+  worker:check:
+    internal: true
+    dir: worker
+    cmds:
+      - gleam check
+
+  worker:test:
+    internal: true
+    dir: worker
+    cmds:
+      - gleam test
+
+  worker:dev:
+    internal: true
+    dir: worker
+    cmds:
+      - |
+        master_base_url="${MASTER_BASE_URL:-}"
+        master_access_key="${MASTER_ACCESS_KEY:-}"
+        worker_id="${WORKER_ID:-}"
+        set -a
+        . ./.env
+        set +a
+        if [ -n "$master_base_url" ]; then export MASTER_BASE_URL="$master_base_url"; fi
+        if [ -n "$master_access_key" ]; then export MASTER_ACCESS_KEY="$master_access_key"; fi
+        if [ -n "$worker_id" ]; then export WORKER_ID="$worker_id"; fi
+        gleam run
+
+  worker:prepare:
+    internal: true
+    dir: worker
+    cmds:
+      - |
+        master_base_url="${MASTER_BASE_URL:-}"
+        master_access_key="${MASTER_ACCESS_KEY:-}"
+        worker_id="${WORKER_ID:-}"
+        worker_request_timeout_ms="${WORKER_REQUEST_TIMEOUT_MS:-}"
+        worker_lease_seconds="${WORKER_LEASE_SECONDS:-}"
+        prepare_limit="${PREPARE_LIMIT:-}"
+
+        export MASTER_BASE_URL=http://localhost
+        export MASTER_ACCESS_KEY="{{.MASTER_ACCESS_KEY}}"
+        export WORKER_ID=preparation-local
+        export WORKER_REQUEST_TIMEOUT_MS="{{.BUCKET_REQUEST_TIMEOUT_MS}}"
+        export WORKER_LEASE_SECONDS=900
+
+        if [ -f ./.env ]; then
+          set -a
+          . ./.env
+          set +a
+        fi
+
+        if [ -n "$master_base_url" ]; then export MASTER_BASE_URL="$master_base_url"; fi
+        if [ -n "$master_access_key" ]; then export MASTER_ACCESS_KEY="$master_access_key"; fi
+        if [ -n "$worker_id" ]; then export WORKER_ID="$worker_id"; fi
+        if [ -n "$worker_request_timeout_ms" ]; then export WORKER_REQUEST_TIMEOUT_MS="$worker_request_timeout_ms"; fi
+        if [ -n "$worker_lease_seconds" ]; then export WORKER_LEASE_SECONDS="$worker_lease_seconds"; fi
+        if [ -n "$prepare_limit" ]; then export PREPARE_LIMIT="$prepare_limit"; fi
+
+        limit="${PREPARE_LIMIT:-100}"
+        while true; do
+          output="$(uv run python main.py --limit "$limit")"
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" | grep -q 'prepared groups=0 distinct_pages=0 artifacts=0' && break
+        done
+
+  shared:fmt:
+    internal: true
+    dir: shared
+    cmds:
+      - gleam format
+
+  shared:check:
+    internal: true
+    dir: shared
+    cmds:
+      - gleam check
+
+  shared:test:
+    internal: true
+    dir: shared
+    cmds:
+      - gleam test
+
+  dev:stack:
+    internal: true
+    cmds:
+      - |
+        go-task master:dev &
+        master_pid=$!
+
+        cleanup() {
+          kill "$master_pid" >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT INT TERM
+
+        for _ in $(seq 1 30); do
+          if curl -fsS "http://127.0.0.1:{{.MASTER_PORT}}/health" >/dev/null 2>&1; then
+            go-task worker:dev
+            exit $?
+          fi
+          sleep 1
+        done
+
+        echo "Master did not become ready in time" >&2
+        exit 1
+
+  knowledge:ensure:
+    internal: true
+    cmds:
+      - bash scripts/populate_knowledge.sh
+
+  prod:prepare:
+    internal: true
+    dir: master
+    cmds:
+      - |
+        export DEPLOY_ROOT="{{.DEPLOY_ROOT}}"
+        if [ -f ./.env ]; then
+          set -a
+          . ./.env
+          set +a
+        fi
+        mkdir -p "$DEPLOY_ROOT"
+        if [ "${SITE_ADDRESS:-localhost}" = "localhost" ]; then
+          sed 's|^{$SITE_ADDRESS:localhost}|http://localhost, http://127.0.0.1|' deploy/Caddyfile > "$DEPLOY_ROOT/Caddyfile"
+        else
+          cp deploy/Caddyfile "$DEPLOY_ROOT/Caddyfile"
+        fi
